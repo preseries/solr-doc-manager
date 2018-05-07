@@ -226,7 +226,7 @@ class DocManager(DocManagerBase):
         return doc
 
     @wrap_exceptions
-    def update(self, document_id, update_spec, namespace, timestamp):
+    def _prepare_update(self, document_id, update_spec):
         """Apply updates given in update_spec to the document whose id
         matches that of doc.
 
@@ -254,6 +254,18 @@ class DocManager(DocManagerBase):
             updated = self.apply_update(doc, update_spec)
             # A _version_ of 0 will always apply the update
             updated['_version_'] = 0
+            return updated
+
+        return None
+
+    @wrap_exceptions
+    def update(self, document_id, update_spec, namespace, timestamp):
+        """Apply updates given in update_spec to the document whose id
+        matches that of doc.
+
+        """
+        updated = self._prepare_update(document_id, update_spec)
+        if updated:
             self.upsert(updated, namespace, timestamp)
             return updated
 
@@ -287,7 +299,14 @@ class DocManager(DocManagerBase):
         else:
             add_kwargs = {"commit": False}
 
-        cleaned = (self._clean_doc(d, namespace, timestamp) for d in docs)
+        cleaned = []
+        for d in docs:
+            # If it was an update, we need to apply the update to the
+            # current doc in Solr
+            if "update_spec" in d:
+                d = self.apply_update(d["_id"], d["update_spec"])
+            cleaned.append(self._clean_doc(d, namespace, timestamp))
+
         if self.chunk_size > 0:
             batch = list(next(cleaned) for i in range(self.chunk_size))
             while batch:
