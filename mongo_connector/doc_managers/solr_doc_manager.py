@@ -226,7 +226,8 @@ class DocManager(DocManagerBase):
         return doc
 
     @wrap_exceptions
-    def _prepare_update(self, document_id, update_spec, force_commit=True):
+    def _prepare_update(self, document_id, update_spec,
+                        force_commit=True, docs_cache={}):
         """Apply updates given in update_spec to the document whose id
         matches that of doc.
 
@@ -243,12 +244,18 @@ class DocManager(DocManagerBase):
             u(document_id)
         ))
 
-        query = "%s:%s" % (self.unique_key, document_id)
-        results = self.solr.search(query)
-        if not len(results):
-            # Document may not be retrievable yet
-            self.commit()
+        # Checking if the document to update is already in the cache
+        # If its not in the cache, we request it to the Solr backend.
+        if document_id not in docs_cache:
+            query = "%s:%s" % (self.unique_key, document_id)
             results = self.solr.search(query)
+            if not len(results):
+                # Document may not be retrievable yet
+                self.commit()
+                results = self.solr.search(query)
+        else:
+            results = [docs_cache[document_id]]
+
         # Results is an iterable containing only 1 result
         for doc in results:
             # Remove metadata previously stored by Mongo Connector.
@@ -257,6 +264,10 @@ class DocManager(DocManagerBase):
             updated = self.apply_update(doc, update_spec)
             # A _version_ of 0 will always apply the update
             updated['_version_'] = 0
+
+            # Caching the update document for further updates
+            docs_cache[document_id] = updated
+
             return updated
 
         raise errors.OperationFailed(
@@ -296,41 +307,51 @@ class DocManager(DocManagerBase):
 
         docs may be any iterable
         """
-        if self.auto_commit_interval is not None:
-            add_kwargs = {
-                "commit": (self.auto_commit_interval == 0),
-                "commitWithin": str(self.auto_commit_interval)
-            }
-        else:
-            add_kwargs = {"commit": False}
 
-        commit_done = False
+        # Caching all the documents we are going to procees
+        # to avoid lookup for the documents in the Solr backend if the
+        # document was already processed inside this bulk operation
+        bulk_docs_cache = {}
 
-        cleaned = []
-        for d in docs:
-            # If it was an update, we need to apply the update to the
-            # current doc in Solr
-            if "update_spec" in d:
+        try:
+            if self.auto_commit_interval is not None:
+                add_kwargs = {
+                    "commit": (self.auto_commit_interval == 0),
+                    "commitWithin": str(self.auto_commit_interval)
+                }
+            else:
+                add_kwargs = {"commit": False}
 
-                if not commit_done:
-                    # Commit outstanding changes so that the documents to be
-                    # updated are the same version to which the changes apply.
-                    self.commit()
-                    commit_done = True
+            commit_done = False
 
-                d = self._prepare_update(d["_id"],
-                                         d["update_spec"],
-                                         force_commit=False)
-            cleaned.append(self._clean_doc(d, namespace, timestamp))
+            cleaned = []
+            for d in docs:
+                # If it was an update, we need to apply the update to the
+                # current doc in Solr
+                if "update_spec" in d:
 
-        if self.chunk_size > 0:
-            batch = list(next(cleaned) for i in range(self.chunk_size))
-            while batch:
-                self.solr.add(batch, **add_kwargs)
-                batch = list(next(cleaned)
-                             for i in range(self.chunk_size))
-        else:
-            self.solr.add(cleaned, **add_kwargs)
+                    if not commit_done:
+                        # Commit outstanding changes so that the documents to be
+                        # updated are the same version to which the changes apply.
+                        self.commit()
+                        commit_done = True
+
+                    d = self._prepare_update(d["_id"],
+                                             d["update_spec"],
+                                             force_commit=False,
+                                             docs_cache=bulk_docs_cache)
+                cleaned.append(self._clean_doc(d, namespace, timestamp))
+
+            if self.chunk_size > 0:
+                batch = list(next(cleaned) for i in range(self.chunk_size))
+                while batch:
+                    self.solr.add(batch, **add_kwargs)
+                    batch = list(next(cleaned)
+                                 for i in range(self.chunk_size))
+            else:
+                self.solr.add(cleaned, **add_kwargs)
+        finally:
+            bulk_docs_cache = None
 
     @wrap_exceptions
     def insert_file(self, f, namespace, timestamp):
