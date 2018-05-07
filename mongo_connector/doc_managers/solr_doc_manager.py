@@ -226,14 +226,17 @@ class DocManager(DocManagerBase):
         return doc
 
     @wrap_exceptions
-    def _prepare_update(self, document_id, update_spec):
+    def _prepare_update(self, document_id, update_spec, force_commit=True):
         """Apply updates given in update_spec to the document whose id
         matches that of doc.
 
         """
-        # Commit outstanding changes so that the document to be updated is the
-        # same version to which the changes apply.
-        self.commit()
+
+        if force_commit:
+            # Commit outstanding changes so that the document to be updated is
+            # the same version to which the changes apply.
+            self.commit()
+
         # Need to escape special characters in the document_id.
         document_id = ''.join(map(
             lambda c: '\\' + c if c in ESCAPE_CHARACTERS else c,
@@ -304,7 +307,9 @@ class DocManager(DocManagerBase):
             # If it was an update, we need to apply the update to the
             # current doc in Solr
             if "update_spec" in d:
-                d = self.apply_update(d["_id"], d["update_spec"])
+                d = self._prepare_update(d["_id"],
+                                         d["update_spec"],
+                                         force_commit=False)
             cleaned.append(self._clean_doc(d, namespace, timestamp))
 
         if self.chunk_size > 0:
