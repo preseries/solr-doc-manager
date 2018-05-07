@@ -342,6 +342,7 @@ class DocManager(DocManagerBase):
                                              force_commit=False,
                                              docs_cache=bulk_docs_cache)
                 cleaned.append(self._clean_doc(d, namespace, timestamp))
+                cleaned = iter(cleaned)
 
             if self.chunk_size > 0:
                 batch = list(next(cleaned) for i in range(self.chunk_size))
