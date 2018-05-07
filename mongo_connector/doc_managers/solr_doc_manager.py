@@ -255,7 +255,7 @@ class DocManager(DocManagerBase):
                 results = self.solr.search(query)
         else:
             logging.debug("Document found in the cache: %s" % document_id)
-            results = [docs_cache[document_id]]
+            results = iter([docs_cache[document_id]])
 
         # Results is an iterable containing only 1 result
         for doc in results:
@@ -351,8 +351,9 @@ class DocManager(DocManagerBase):
                                  for i in range(self.chunk_size))
             else:
                 self.solr.add(cleaned, **add_kwargs)
-        finally:
-            bulk_docs_cache = None
+        except Exception as e:
+            logging.error("Failed to execute bulk")
+            raise e
 
     @wrap_exceptions
     def insert_file(self, f, namespace, timestamp):
