@@ -259,7 +259,9 @@ class DocManager(DocManagerBase):
             updated['_version_'] = 0
             return updated
 
-        return None
+        raise errors.OperationFailed(
+            'Unable to find the document to update. ID [%s] Update spec: [%r]'
+            % (document_id, update_spec))
 
     @wrap_exceptions
     def update(self, document_id, update_spec, namespace, timestamp):
@@ -302,11 +304,20 @@ class DocManager(DocManagerBase):
         else:
             add_kwargs = {"commit": False}
 
+        commit_done = False
+
         cleaned = []
         for d in docs:
             # If it was an update, we need to apply the update to the
             # current doc in Solr
             if "update_spec" in d:
+
+                if not commit_done:
+                    # Commit outstanding changes so that the documents to be
+                    # updated are the same version to which the changes apply.
+                    self.commit()
+                    commit_done = True
+
                 d = self._prepare_update(d["_id"],
                                          d["update_spec"],
                                          force_commit=False)
