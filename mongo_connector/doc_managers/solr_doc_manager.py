@@ -54,6 +54,65 @@ ESCAPE_CHARACTERS = set('+-&|!(){}[]^"~*?:\\/')
 decoder = json.JSONDecoder()
 
 
+class SearchPaginator(object):
+
+    CURSORMARK_FIELD = 'cursorMark'
+    NEXT_CURSORMARK_FIELD = 'nextCursorMark'
+
+    def __init__(self, solr, query_string, limit=None,
+                 max_limit=200, **kwargs):
+
+        self.solr = solr
+        self.query_string = query_string
+        self.limit = limit
+        self.cursorMark = "*"
+        self.max_limit = max_limit
+        self.search_kwargs = kwargs.copy()
+        self.results = None
+        self.loaded_docs = 0
+
+    def get_results(self):
+        return self.results
+
+    def get_loaded_docs(self):
+        return self.loaded_docs
+
+    def has_next(self):
+        return self.results is None or self.cursorMark != \
+               self.get_results()[SearchPaginator.NEXT_CURSORMARK_FIELD]
+
+    def next(self):
+
+        if self.has_next():
+
+            # Save the next cursor mark as the actual cursor mark to send
+            # to the server
+            if self.results:
+                self.cursorMark = self.results[
+                    SearchPaginator.NEXT_CURSORMARK_FIELD]
+
+            # Signaling the cursor mark
+            if 'start_offset' in self.search_kwargs:
+                del self.search_kwargs[str('start_offset')]
+
+            self.search_kwargs['end_offset'] = self.limit \
+                if self.limit is not None and \
+                self.limit < self.max_limit else self.max_limit
+
+            self.search_kwargs[SearchPaginator.CURSORMARK_FIELD] = \
+                self.cursorMark
+
+            # Do the search
+            self.results = self.solr.search(
+                query_string=self.query_string, **self.search_kwargs)
+
+            self.loaded_docs += len(self.results['results'])
+
+            return self.results
+        else:
+            return []
+
+
 class DocManager(DocManagerBase):
     """The DocManager class creates a connection to the backend engine and
     adds/removes documents, and in the case of rollback, searches for them.
@@ -233,16 +292,30 @@ class DocManager(DocManagerBase):
 
         """
 
-        if force_commit:
-            # Commit outstanding changes so that the document to be updated is
-            # the same version to which the changes apply.
-            self.commit()
+        # Commit outstanding changes so that the document to be updated is
+        # the same version to which the changes apply.
+        self.commit()
 
         # Need to escape special characters in the document_id.
         document_id = ''.join(map(
             lambda c: '\\' + c if c in ESCAPE_CHARACTERS else c,
             u(document_id)
         ))
+
+        # We try to optimize the way we load all the bulk documents from
+        # Solr when they are not present in the cache
+        if isinstance(document_id, (list, tuple)):
+            # Let's load all the documents that we do not have yet into the
+            # cache
+            unknown_docs = [doc_id for doc_id in document_id
+                            if doc_id not in docs_cache]
+            query = "%s:(%s)" % (self.unique_key, ' OR '.join(unknown_docs))
+            paginator = SearchPaginator(solr=self.solr, query_string=query,
+                                        limit=1000, max_limit=1000)
+            while paginator.has_next():
+                results = iter(paginator.get_results())
+                for doc in results:
+                    docs_cache[doc[self.unique_key]] = doc
 
         # Checking if the document to update is already in the cache
         # If its not in the cache, we request it to the Solr backend.
@@ -333,7 +406,8 @@ class DocManager(DocManagerBase):
 
                     if not commit_done:
                         # Commit outstanding changes so that the documents to be
-                        # updated are the same version to which the changes apply.
+                        # updated are the same version to which the changes
+                        # apply.
                         self.commit()
                         commit_done = True
 
