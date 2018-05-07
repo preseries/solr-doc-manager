@@ -254,6 +254,7 @@ class DocManager(DocManagerBase):
                 self.commit()
                 results = self.solr.search(query)
         else:
+            logging.debug("Document found in the cache: %s" % document_id)
             results = [docs_cache[document_id]]
 
         # Results is an iterable containing only 1 result
