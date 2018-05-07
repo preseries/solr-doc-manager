@@ -285,8 +285,7 @@ class DocManager(DocManagerBase):
         return doc
 
     @wrap_exceptions
-    def _prepare_update(self, document_id, update_spec,
-                        force_commit=True, docs_cache={}):
+    def _prepare_update(self, document_id, update_spec, docs_cache={}):
         """Apply updates given in update_spec to the document whose id
         matches that of doc.
 
@@ -311,7 +310,7 @@ class DocManager(DocManagerBase):
                             if doc_id not in docs_cache]
             query = "%s:(%s)" % (self.unique_key, ' OR '.join(unknown_docs))
             paginator = SearchPaginator(solr=self.solr, query_string=query,
-                                        limit=1000, max_limit=1000)
+                                        limit=2500, max_limit=2500)
             while paginator.has_next():
                 results = iter(paginator.get_results())
                 for doc in results:
@@ -413,7 +412,6 @@ class DocManager(DocManagerBase):
 
                     d = self._prepare_update(d["_id"],
                                              d["update_spec"],
-                                             force_commit=False,
                                              docs_cache=bulk_docs_cache)
                 cleaned.append(self._clean_doc(d, namespace, timestamp))
             cleaned = iter(cleaned)
