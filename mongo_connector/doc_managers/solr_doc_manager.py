@@ -421,8 +421,11 @@ class DocManager(DocManagerBase):
                         update_spec = update_spec_by_doc[doc_id]
 
                         # Remove metadata previously stored by Mongo Connector.
-                        doc.pop('ns')
-                        doc.pop('_ts')
+                        # If the documents comes from the cache, then the
+                        # metadata could not be present in the document
+                        doc.pop('ns') if 'ns' in doc else None
+                        doc.pop('_ts') if '_ts' in doc else None
+
                         updated = self.apply_update(doc, update_spec)
                         # A _version_ of 0 will always apply the update
                         updated['_version_'] = 0
