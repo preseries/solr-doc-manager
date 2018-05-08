@@ -54,6 +54,22 @@ ESCAPE_CHARACTERS = set('+-&|!(){}[]^"~*?:\\/')
 
 decoder = json.JSONDecoder()
 
+LOG = logging.getLogger(__name__)
+
+
+class EmptyResults(object):
+    hits = 0
+    docs = []
+
+    def __len__(self):
+        return 0
+
+    def __getitem__(self, k):
+        if isinstance(k, slice):
+            return []
+        else:
+            raise IndexError("It's not here.")
+
 
 class SearchPaginator(object):
 
@@ -79,8 +95,12 @@ class SearchPaginator(object):
         return self.loaded_docs
 
     def has_next(self):
-        return self.results is None or self.cursorMark != \
-               self.get_results()[SearchPaginator.NEXT_CURSORMARK_FIELD]
+        return self.results is None or (
+                hasattr(self.get_results(),
+                        SearchPaginator.NEXT_CURSORMARK_FIELD) and
+                self.cursorMark !=
+                getattr(self.get_results(),
+                        SearchPaginator.NEXT_CURSORMARK_FIELD))
 
     def next(self):
 
@@ -88,15 +108,17 @@ class SearchPaginator(object):
 
             # Save the next cursor mark as the actual cursor mark to send
             # to the server
-            if self.results:
-                self.cursorMark = self.results[
-                    SearchPaginator.NEXT_CURSORMARK_FIELD]
+            if self.results and \
+                    hasattr(self.results,
+                            SearchPaginator.NEXT_CURSORMARK_FIELD):
+                self.cursorMark = getattr(self.results,
+                                          SearchPaginator.NEXT_CURSORMARK_FIELD)
 
             # Signaling the cursor mark
-            if 'start_offset' in self.search_kwargs:
-                del self.search_kwargs[str('start_offset')]
+            if 'start' in self.search_kwargs:
+                del self.search_kwargs[str('start')]
 
-            self.search_kwargs['end_offset'] = self.limit \
+            self.search_kwargs['rows'] = self.limit \
                 if self.limit is not None and \
                 self.limit < self.max_limit else self.max_limit
 
@@ -105,13 +127,13 @@ class SearchPaginator(object):
 
             # Do the search
             self.results = self.solr.search(
-                query_string=self.query_string, **self.search_kwargs)
+                q=self.query_string, **self.search_kwargs)
 
-            self.loaded_docs += len(self.results['results'])
+            self.loaded_docs += len(self.results.docs)
 
             return self.results
         else:
-            return []
+            return EmptyResults()
 
 
 class DocManager(DocManagerBase):
@@ -255,7 +277,7 @@ class DocManager(DocManagerBase):
     def apply_update(self, doc, update_spec):
         """Override DocManagerBase.apply_update to have flat documents."""
         # Replace a whole document
-        if not '$set' in update_spec and not '$unset' in update_spec:
+        if '$set' not in update_spec and '$unset' not in update_spec:
             # update_spec contains the new document.
             # Update the key in Solr based on the unique_key mentioned as
             # parameter.
@@ -292,102 +314,151 @@ class DocManager(DocManagerBase):
 
         """
 
-        # Commit outstanding changes so that the document to be updated is
-        # the same version to which the changes apply.
-        self.commit()
+        try:
+            # Commit outstanding changes so that the document to be updated is
+            # the same version to which the changes apply.
+            self.commit()
 
-        # Need to escape special characters in the document_id.
-        def escape_doc_id(doc_id):
-            return ''.join(map(
-                lambda c: '\\' + c if c in ESCAPE_CHARACTERS else c,
-                u(doc_id)))
+            # Need to escape special characters in the document_id.
+            def escape_doc_id(doc_id):
+                return ''.join(map(
+                    lambda c: '\\' + c if c in ESCAPE_CHARACTERS else c,
+                    u(doc_id)))
 
-        def chunks(l, n):
-            """Yield successive n-sized chunks from l."""
-            for i in xrange(0, len(l), n):
-                yield l[i:i + n]
+            # Let's compute the statistics
+            prepare_update_start_time = time.time()
+            solr_request_elapsed_times = []
+            solr_requests = 0
+            apply_update_elapsed_times = []
+            apply_updates = 0
 
-        # Let's compute the statistics
-        prepare_update_start_time = time.time()
-        solr_request_elapsed_times = []
-        solr_requests = 0
-        apply_update_elapsed_times = []
-        apply_updates = 0
+            updated = None
 
-        updated = None
+            # We try to optimize the way we load all the bulk documents from
+            # Solr when they are not present in the cache
+            if isinstance(document_id, (list, tuple)):
 
-        # We try to optimize the way we load all the bulk documents from
-        # Solr when they are not present in the cache
-        if isinstance(document_id, (list, tuple)):
+                # Escape document id of special chars
+                document_id = [escape_doc_id(doc_id) for doc_id in document_id]
 
-            # Escape document id of special chars
-            document_id = {escape_doc_id(doc_id): update_spec[index]
-                           for index, doc_id in enumerate(document_id)}
+                # Mapping to get faster the references to the associated update
+                # spec of the document to update
+                update_spec_by_doc = {doc_id: update_spec[index]
+                                      for index, doc_id in enumerate(document_id)}
 
-            # Mapping to get faster the references to the associated update
-            # spec of the document to update
-            update_spec_by_doc = {doc_id: update_spec[index]
-                                  for index, doc_id in enumerate(document_id)}
+                # Look for the documents that we do not have yet in the cache
+                unknown_docs = [doc_id for doc_id in document_id
+                                if doc_id not in docs_cache]
 
-            # Look for the documents that we do not have yet in the cache
-            unknown_docs = [doc_id for doc_id in document_id
-                            if doc_id not in docs_cache]
+                # The query will find all the documents in the bulk.
+                query = "%s:(%s)" % (self.unique_key,
+                                     ' OR '.join(list(set(unknown_docs))))
 
-            # Let's load the unknown documents using chunks of 2500 documents
-            docs_id_chunks = chunks(unknown_docs, 1000)
-            for chunk in docs_id_chunks:
-                solr_request_start_time = time.time()
+                # To use the CURSORMARK field we need to sort the results by
+                # the primary key
+                search_kwargs = {
+                    'sort': '%s desc' % self.unique_key
+                }
 
-                query = "%s:(%s)" % (self.unique_key, ' OR '.join(chunk))
+                # The paginator is using the cursorMark/nextCursorMark feature
+                # to improve the cursor performance. Solr is remembering in the
+                # server the last position processed in the cursor and it does
+                # not have to perform the query again
                 paginator = SearchPaginator(solr=self.solr,
                                             query_string=query,
-                                            limit=len(chunk),
-                                            max_limit=len(chunk))
-                # We have only one page
-                paginator.has_next()
-                results = iter(paginator.get_results())
-                for doc in results:
-                    docs_cache[doc[self.unique_key]] = doc
+                                            limit=1000,
+                                            max_limit=1000,
+                                            **search_kwargs)
 
-                solr_requests += 1
-                solr_request_elapsed_times.append(
-                    time.time() - solr_request_start_time)
-
-            updated_docs = []
-            for index, doc_id in enumerate(document_id):
-
-                apply_update__start_time = time.time()
-
-                # If for any reason we were unable to load the doc before
-                if doc_id not in docs_cache:
+                while paginator.has_next():
                     solr_request_start_time = time.time()
-
-                    query = "%s:%s" % (self.unique_key, doc_id)
-                    results = self.solr.search(query)
+                    results = iter(paginator.next().docs)
+                    for doc in results:
+                        docs_cache[doc[self.unique_key]] = doc
 
                     solr_requests += 1
                     solr_request_elapsed_times.append(
                         time.time() - solr_request_start_time)
 
-                    if not len(results):
-                        # Document may not be retrievable yet
+                updated_docs = []
+                for index, doc_id in enumerate(document_id):
+
+                    apply_update__start_time = time.time()
+
+                    # If for any reason we were unable to load the doc before
+                    if doc_id not in docs_cache:
                         solr_request_start_time = time.time()
 
-                        self.commit()
+                        query = "%s:%s" % (self.unique_key, doc_id)
                         results = self.solr.search(query)
 
                         solr_requests += 1
                         solr_request_elapsed_times.append(
                             time.time() - solr_request_start_time)
+
+                        if not len(results):
+                            # Document may not be retrievable yet
+                            solr_request_start_time = time.time()
+
+                            self.commit()
+                            results = self.solr.search(query)
+
+                            solr_requests += 1
+                            solr_request_elapsed_times.append(
+                                time.time() - solr_request_start_time)
+                    else:
+                        LOG.debug(
+                            "Document found in the cache: %s" % doc_id)
+                        results = iter([docs_cache[doc_id]])
+
+                    # Results is an iterable containing only 1 result
+                    for doc in results:
+                        # Getting the update_spec
+                        update_spec = update_spec_by_doc[doc_id]
+
+                        # Remove metadata previously stored by Mongo Connector.
+                        doc.pop('ns')
+                        doc.pop('_ts')
+                        updated = self.apply_update(doc, update_spec)
+                        # A _version_ of 0 will always apply the update
+                        updated['_version_'] = 0
+
+                        # Caching the update document for further updates
+                        docs_cache[doc_id] = updated
+
+                        updated_docs.append(updated)
+
+                    apply_updates += 1
+                    apply_update_elapsed_times.append(
+                        time.time() - apply_update__start_time)
+
+                updated = updated_docs
+
+            else:
+                document_id = escape_doc_id(document_id)
+
+                # Checking if the document to update is already in the cache
+                # If its not in the cache, we request it to the Solr backend.
+                if document_id not in docs_cache:
+                    solr_request_start_time = time.time()
+
+                    query = "%s:%s" % (self.unique_key, document_id)
+                    results = self.solr.search(query)
+                    if not len(results):
+                        # Document may not be retrievable yet
+                        self.commit()
+                        results = self.solr.search(query)
+
+                    solr_requests += 1
+                    solr_request_elapsed_times.append(
+                        time.time() - solr_request_start_time)
                 else:
-                    logging.debug(
-                        "Document found in the cache: %s" % doc_id)
-                    results = iter([docs_cache[doc_id]])
+                    LOG.debug("Document found in the cache: %s" % document_id)
+                    results = iter([docs_cache[document_id]])
 
                 # Results is an iterable containing only 1 result
                 for doc in results:
-                    # Getting the update_spec
-                    update_spec = update_spec_by_doc[doc_id]
+                    apply_update_start_time = time.time()
 
                     # Remove metadata previously stored by Mongo Connector.
                     doc.pop('ns')
@@ -397,88 +468,47 @@ class DocManager(DocManagerBase):
                     updated['_version_'] = 0
 
                     # Caching the update document for further updates
-                    docs_cache[doc_id] = updated
+                    docs_cache[document_id] = updated
 
-                    updated_docs.append(updated)
+                    apply_updates += 1
+                    apply_update_elapsed_times.append(
+                        time.time() - apply_update_start_time)
 
-                apply_updates += 1
-                apply_update_elapsed_times.append(
-                    time.time() - apply_update__start_time)
+            if not updated:
+                raise errors.OperationFailed(
+                    'Unable to find the document to update. ID [%s] '
+                    'Update spec: [%r]' % (document_id, update_spec))
 
-            updated = updated_docs
+            stats = {
+                # The time needed to process all the updates
+                "prepare_udate_elapsed_time": prepare_update_start_time,
 
-        else:
-            document_id = escape_doc_id(document_id)
+                # The list of times needed by each Solr request to be processed
+                "solr_request_elapsed_time": solr_request_elapsed_times,
 
-            # Checking if the document to update is already in the cache
-            # If its not in the cache, we request it to the Solr backend.
-            if document_id not in docs_cache:
-                solr_request_start_time = time.time()
+                # The total time needed to process all the Solr requests
+                "total_solr_requests_elapsed_time":
+                    reduce(lambda x, y: x + y, solr_request_elapsed_times),
 
-                query = "%s:%s" % (self.unique_key, document_id)
-                results = self.solr.search(query)
-                if not len(results):
-                    # Document may not be retrievable yet
-                    self.commit()
-                    results = self.solr.search(query)
+                # The average time of processing all the Solr requests
+                "avg_solr_request_elapsed_time":
+                    reduce(lambda x, y: x + y, solr_request_elapsed_times) /
+                    solr_requests,
 
-                solr_requests += 1
-                solr_request_elapsed_times.append(
-                    time.time() - solr_request_start_time)
-            else:
-                logging.debug("Document found in the cache: %s" % document_id)
-                results = iter([docs_cache[document_id]])
+                # The total time needed to update all the documents
+                "total_apply_update_elapsed_time":
+                    reduce(lambda x, y: x + y, apply_update_elapsed_times),
 
-            # Results is an iterable containing only 1 result
-            for doc in results:
-                apply_update_start_time = time.time()
+                # The average time of apply updates to all the Solr documents
+                "avg_apply_update_elapsed_time":
+                    reduce(lambda x, y: x + y, apply_update_elapsed_times) /
+                    apply_updates
+            }
 
-                # Remove metadata previously stored by Mongo Connector.
-                doc.pop('ns')
-                doc.pop('_ts')
-                updated = self.apply_update(doc, update_spec)
-                # A _version_ of 0 will always apply the update
-                updated['_version_'] = 0
-
-                # Caching the update document for further updates
-                docs_cache[document_id] = updated
-
-                apply_updates += 1
-                apply_update_elapsed_times.append(
-                    time.time() - apply_update_start_time)
-
-        if not updated:
-            raise errors.OperationFailed(
-                'Unable to find the document to update. ID [%s] '
-                'Update spec: [%r]' % (document_id, update_spec))
-
-        stats = {
-            # The time needed to process all the updates
-            "prepare_udate_elapsed_time": prepare_update_start_time,
-
-            # The list of times needed by each Solr request to be processed
-            "solr_request_elapsed_time": solr_request_elapsed_times,
-
-            # The total time needed to process all the Solr requests
-            "total_solr_requests_elapsed_time":
-                reduce(lambda x, y: x + y, solr_request_elapsed_times),
-
-            # The average time of processing all the Solr requests
-            "avg_solr_request_elapsed_time":
-                reduce(lambda x, y: x + y, solr_request_elapsed_times) /
-                solr_requests,
-
-            # The total time needed to update all the documents
-            "total_apply_update_elapsed_time":
-                reduce(lambda x, y: x + y, apply_update_elapsed_times),
-
-            # The average time of apply updates to all the Solr documents
-            "avg_apply_update_elapsed_time":
-                reduce(lambda x, y: x + y, apply_update_elapsed_times) /
-                apply_updates
-        }
-
-        return updated, stats
+            return updated, stats
+        except Exception as e:
+            LOG.exception("Fata error processing the apply update action.")
+            raise e
 
     @wrap_exceptions
     def update(self, document_id, update_spec, namespace, timestamp):
@@ -546,7 +576,7 @@ class DocManager(DocManagerBase):
                     docs_id_to_update, update_specs_to_apply,
                     docs_cache=bulk_docs_cache)
 
-                logging.error("[INFO] Bulk statistics: %r" % stats)
+                LOG.info("[INFO] Bulk statistics: %r" % stats)
 
             cleaned = iter(cleaned)
 
@@ -558,8 +588,11 @@ class DocManager(DocManagerBase):
                                  for i in range(self.chunk_size))
             else:
                 self.solr.add(cleaned, **add_kwargs)
+
+            # Force the flush of the changes in Solr
+            self.commit()
         except Exception as e:
-            logging.error("Failed to execute bulk")
+            LOG.exception("Failed to execute bulk")
             raise e
 
     @wrap_exceptions
@@ -579,7 +612,7 @@ class DocManager(DocManagerBase):
         request.add_header("Content-type", "application/octet-stream")
         request.data = f
         response = urlopen(request)
-        logging.debug(response.read())
+        LOG.debug(response.read())
 
     @wrap_exceptions
     def remove(self, document_id, namespace, timestamp):
@@ -613,7 +646,7 @@ class DocManager(DocManagerBase):
     def get_last_doc(self):
         """Returns the last document stored in the Solr engine.
         """
-        #search everything, sort by descending timestamp, return 1 row
+        # search everything, sort by descending timestamp, return 1 row
         try:
             result = self.solr.search('*:*', sort='_ts desc', rows=1)
         except ValueError:
