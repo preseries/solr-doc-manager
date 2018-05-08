@@ -583,6 +583,9 @@ class DocManager(DocManagerBase):
                     docs_id_to_update, update_specs_to_apply,
                     docs_cache=bulk_docs_cache)
 
+                cleaned = [self._clean_doc(
+                    d, namespace, timestamp) for d in cleaned]
+
                 LOG.info("[INFO] Bulk statistics: %r" % stats)
 
             cleaned = iter(cleaned)
