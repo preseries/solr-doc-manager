@@ -325,6 +325,11 @@ class DocManager(DocManagerBase):
                     lambda c: '\\' + c if c in ESCAPE_CHARACTERS else c,
                     u(doc_id)))
 
+            def chunks(l, n):
+                """Yield successive n-sized chunks from l."""
+                for i in xrange(0, len(l), n):
+                    yield l[i:i + n]
+
             # Let's compute the statistics
             prepare_update_start_time = time.time()
             solr_request_elapsed_times = []
@@ -350,28 +355,27 @@ class DocManager(DocManagerBase):
                 unknown_docs = [doc_id for doc_id in document_id
                                 if doc_id not in docs_cache]
 
-                # The query will find all the documents in the bulk.
-                query = "%s:(%s)" % (self.unique_key,
-                                     ' OR '.join(list(set(unknown_docs))))
-
-                # To use the CURSORMARK field we need to sort the results by
-                # the primary key
-                search_kwargs = {
-                    'sort': '%s desc' % self.unique_key
-                }
-
-                # The paginator is using the cursorMark/nextCursorMark feature
-                # to improve the cursor performance. Solr is remembering in the
-                # server the last position processed in the cursor and it does
-                # not have to perform the query again
-                paginator = SearchPaginator(solr=self.solr,
-                                            query_string=query,
-                                            limit=1000,
-                                            max_limit=1000,
-                                            **search_kwargs)
-
-                while paginator.has_next():
+                # Let's load the unknown documents using chunks of
+                # 10000 documents
+                docs_id_chunks = chunks(unknown_docs, 10000)
+                for chunk in docs_id_chunks:
                     solr_request_start_time = time.time()
+
+                    query = "%s:(%s)" % (self.unique_key,
+                                         ' OR '.join(list(set(chunk))))
+
+                    # To use the CURSORMARK field we need to sort the results
+                    # by the primary key
+                    search_kwargs = {
+                        'sort': '%s desc' % self.unique_key
+                    }
+
+                    paginator = SearchPaginator(solr=self.solr,
+                                                query_string=query,
+                                                limit=len(chunk),
+                                                max_limit=len(chunk),
+                                                **search_kwargs)
+                    # We have only one page
                     results = iter(paginator.next().docs)
                     for doc in results:
                         docs_cache[doc[self.unique_key]] = doc
