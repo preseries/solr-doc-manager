@@ -426,14 +426,14 @@ class DocManager(DocManagerBase):
                         doc.pop('ns') if 'ns' in doc else None
                         doc.pop('_ts') if '_ts' in doc else None
 
-                        updated = self.apply_update(doc, update_spec)
+                        updated_doc = self.apply_update(doc, update_spec)
                         # A _version_ of 0 will always apply the update
-                        updated['_version_'] = 0
+                        updated_doc['_version_'] = 0
 
                         # Caching the update document for further updates
-                        docs_cache[doc_id] = updated
+                        docs_cache[doc_id] = updated_doc
 
-                        updated_docs.append(updated)
+                        updated_docs.append(updated_doc)
 
                     apply_updates += 1
                     apply_update_elapsed_times.append(
