@@ -308,7 +308,7 @@ class DocManager(DocManagerBase):
         return doc
 
     @wrap_exceptions
-    def _prepare_update(self, document_id, update_spec, docs_cache):
+    def _prepare_update(self, document_id, update_spec):
         """Apply updates given in update_spec to the document whose id
         matches that of doc.
 
