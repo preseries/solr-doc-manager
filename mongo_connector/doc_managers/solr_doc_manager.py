@@ -315,7 +315,7 @@ class DocManager(DocManagerBase):
         """
 
         try:
-            docs_cache = docs_cache if docs_cache else {}
+            docs_cache = {}
 
             # Commit outstanding changes so that the document to be updated is
             # the same version to which the changes apply.
