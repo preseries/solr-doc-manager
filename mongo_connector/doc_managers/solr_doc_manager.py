@@ -512,6 +512,12 @@ class DocManager(DocManagerBase):
                     apply_updates
             }
 
+            for doc in updated:
+                if '_ts' in doc or 'ns' in doc:
+                    raise errors.OperationFailed(
+                        "There is a document with _ts and ns fields: %s"
+                        % doc['_id'])
+
             return updated, stats
         except Exception as e:
             LOG.exception("Fata error processing the apply update action.")
