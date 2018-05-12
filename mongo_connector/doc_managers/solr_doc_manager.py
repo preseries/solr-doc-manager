@@ -308,13 +308,15 @@ class DocManager(DocManagerBase):
         return doc
 
     @wrap_exceptions
-    def _prepare_update(self, document_id, update_spec, docs_cache={}):
+    def _prepare_update(self, document_id, update_spec, docs_cache):
         """Apply updates given in update_spec to the document whose id
         matches that of doc.
 
         """
 
         try:
+            docs_cache = docs_cache if docs_cache else {}
+
             # Commit outstanding changes so that the document to be updated is
             # the same version to which the changes apply.
             self.commit()
@@ -528,7 +530,7 @@ class DocManager(DocManagerBase):
 
             return updated, stats
         except Exception as e:
-            LOG.exception("Fata error processing the apply update action.")
+            LOG.exception("Fatal error processing the apply update action.")
             raise e
 
     @wrap_exceptions
@@ -568,8 +570,6 @@ class DocManager(DocManagerBase):
         # Caching all the documents we are going to procees
         # to avoid lookup for the documents in the Solr backend if the
         # document was already processed inside this bulk operation
-        bulk_docs_cache = {}
-
         try:
             if self.auto_commit_interval is not None:
                 add_kwargs = {
@@ -593,12 +593,11 @@ class DocManager(DocManagerBase):
 
             if len(docs_id_to_update) > 0:
                 # Now we need to request the update of all the documents
-                cleaned, stats = self._prepare_update(
-                    docs_id_to_update, update_specs_to_apply,
-                    docs_cache=bulk_docs_cache)
+                updated, stats = self._prepare_update(
+                    docs_id_to_update, update_specs_to_apply)
 
                 cleaned = [self._clean_doc(
-                    d, namespace, timestamp) for d in cleaned]
+                    d, namespace, timestamp) for d in updated]
 
                 LOG.info("[INFO] Bulk statistics: %r" % stats)
 
