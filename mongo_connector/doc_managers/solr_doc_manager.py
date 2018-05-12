@@ -512,7 +512,15 @@ class DocManager(DocManagerBase):
                     apply_updates
             }
 
+            # Check that the documents appears only once in the bulk
+            ids = []
             for doc in updated:
+                doc_id = doc['id']
+                if doc_id in ids:
+                    raise errors.OperationFailed(
+                        "There are duplicated documents in the bulk. ID: %s"
+                        % doc_id)
+
                 if '_ts' in doc or 'ns' in doc:
                     raise errors.OperationFailed(
                         "There is a document with _ts and ns fields: %s"
